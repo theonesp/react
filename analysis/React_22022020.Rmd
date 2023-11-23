@@ -1,0 +1,1192 @@
+---
+title: "React"
+author: Miguel Ángel Armengol de la Hoz
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_notebook:
+    code_folding: hide
+    number_sections: yes
+    theme: flatly
+    toc: yes
+    toc_float: yes 
+
+knit: (function(inputFile, encoding) { rmarkdown::render(inputFile, encoding = encoding, output_file = paste0(substr(inputFile,1,nchar(inputFile)-4)," ",Sys.Date(),'.html')) })
+---
+
+# Environment
+
+```{r message=FALSE, warning=FALSE}
+library(psych)
+library(plotly)
+library(reshape2)
+require(gridExtra)
+require(rnn)
+library(lme4)
+library(jtools)
+library(stringr)
+library(tidyverse)
+library(voxel)
+library(lattice)
+library(gridExtra)
+library(table1)
+library(tableone)
+library(reshape2)
+library(lmerTest)
+library(survival)
+library(survminer)
+library(readxl)
+library(xlsx)
+library(data.table)
+library(Amelia)
+
+# Not in function definition
+'%!in%' <- function(x,y)!('%in%'(x,y))
+# Scale a series between two points
+range01 <- function(x, ...){(x - min(x, ...)) / (max(x, ...) - min(x, ...))}
+# mean center and Standardization
+meancstand <- function(x){
+result<-as.numeric(scale(log(x), center=T, scale=T))
+return(result)
+}
+
+```
+
+# Data Source
+
+Version2; "copy for miguael.xlsx"
+
+from:	jim var <giourkasparos@hotmail.com>
+to:	"Miguel Ángel Armengol  <ma.armengol.hcsc@gmail.com>
+22 feb 2021 1:58
+
+
+```{r}
+# we have manually reviewed it and columns 2,6.67,82 are date datatype
+
+
+finaldatasetAll3visits <- read_excel("../data/REACTDATAmortalityclean.xlsx")
+#renaming the column
+finaldatasetAll3visits$date_of_implant<-finaldatasetAll3visits$date_of_implant...3
+finaldatasetAll3visits$date_of_implant<-as.POSIXct(finaldatasetAll3visits$date_of_implant,format="%Y-%m-%d")
+finaldatasetAll3visits$date_of_visit<-as.POSIXct(finaldatasetAll3visits$date_of_visit,format="%Y-%m-%d")
+finaldatasetAll3visits$visit_date1<-as.POSIXct(finaldatasetAll3visits$visit_date1,format="%Y-%m-%d")
+```
+
+## Variables revalue
+
+We are replacing all cells with fibrillation==2 with 1
+
+```{r message=FALSE, warning=FALSE}
+print('Distribution before revalue')
+table(finaldatasetAll3visits$fibrillation)
+finaldatasetAll3visits$fibrillation[finaldatasetAll3visits$fibrillation==2]<-1
+finaldatasetAll3visits$fibrillation<-as.character(finaldatasetAll3visits$fibrillation)
+print('Distribution after revalue')
+table(finaldatasetAll3visits$fibrillation)
+```
+
+# Variables creation
+
+## LBBB
+
+```{r}
+print('conduction, parent variable for LBBB')
+table(finaldatasetAll3visits$conduction)
+summary(finaldatasetAll3visits$conduction)
+
+
+finaldatasetAll3visits<-finaldatasetAll3visits%>%mutate(
+LBBB = if_else(conduction ==1,1,0)
+)
+
+print('LBBB just created')
+table(finaldatasetAll3visits$LBBB)
+summary(finaldatasetAll3visits$LBBB)
+
+print('qr baseline parent variable')
+hist(finaldatasetAll3visits$qrshbaseline)
+
+finaldatasetAll3visits<-finaldatasetAll3visits%>%mutate(
+qrshbaseline_bin = if_else(qrshbaseline >=150,1,0)
+)
+
+print('qrshbaseline_bin just created')
+table(finaldatasetAll3visits$qrshbaseline_bin)
+```
+
+
+# LVEF modeling
+
+Exclude baseline lvef > 35
+
+## Exclusion criteria
+
+```{r}
+lvef_dataset<-finaldatasetAll3visits
+
+paste('Initial cohort size:',nrow(lvef_dataset))
+
+
+a<-nrow(lvef_dataset)
+lvef_dataset<-lvef_dataset%>%filter(!is.na(age))
+b<-nrow(lvef_dataset)
+print('Participant with missing age')
+a-b
+
+lvef_dataset<-lvef_dataset%>%filter(!is.na(sex))
+c<-nrow(lvef_dataset)
+print('Participant with missing sex')
+b-c
+
+lvef_dataset<-lvef_dataset%>%filter(!is.na(lvef))
+print('Participant with missing baseline lvef')
+d<-nrow(lvef_dataset)
+c-d
+
+lvef_dataset<-lvef_dataset%>%filter(lvef<=35)
+print('Participant with baseline lvef > 35%')
+e<-nrow(lvef_dataset)
+d-e
+
+paste('Final cohort size:',nrow(lvef_dataset))
+```
+
+
+## Reshaping the dataset
+
+In order to display changes inlvef over time, we will construct a longitudinal regression model. To do this, we first need to convert the data to long format.
+
+### Selecting the variables that will be included in the model
+
+```{r}
+lvef_dataset_to_reshape_lvef<-lvef_dataset%>%mutate(
+  lvef_baseline_static = lvef
+)%>%dplyr::select(
+# Fields that remain fixed across exams  
+  ID, sex, age, LBBB
+# adjustment
+,dm, htn, tobacco, etiology_of_heart_failure,  fibrillation, qrshbaseline, lvef_baseline_static, qrshbaseline_bin  
+# Fields that vary in each exam
+, lvef, lvef1, lvef6
+
+)
+
+lvef_dataset_to_reshape_lvef$age<-round(lvef_dataset_to_reshape_lvef$age,2)
+
+```
+
+#### Table 1 of variables to be modeled
+
+```{r}
+table1(~sex + age + lvef + lvef1 + lvef6 + dm + htn + tobacco + etiology_of_heart_failure + fibrillation + qrshbaseline + LBBB + qrshbaseline_bin  , data =  lvef_dataset_to_reshape_lvef)
+```
+
+#### Missingness Map
+
+```{r}
+missmap(lvef_dataset_to_reshape_lvef)
+```
+
+
+### Applying reshape
+
+```{r}
+vars_that_dont_vary<-c("ID","sex","age","dm", "htn", "tobacco", "etiology_of_heart_failure",  "fibrillation", "qrshbaseline","qrshbaseline_bin","lvef_baseline_static","LBBB" )
+
+lvef_long<-melt(lvef_dataset_to_reshape_lvef, ID.vars = vars_that_dont_vary
+          ,measure.vars = c("lvef","lvef1","lvef6")
+          ,variable.name = c("exam")
+          ,value.name = "lvef_series"
+          )
+
+lvef_long<-lvef_long%>%group_by(ID)%>%mutate(
+  time = c(0,1,6)
+)
+
+row.names(lvef_long) <- NULL
+
+lvef_long$ID <- as.factor(lvef_long$ID)
+lvef_long$sex<-as.factor(lvef_long$sex)
+lvef_long$time<-as.factor(lvef_long$time)
+lvef_long$dm<-as.factor(lvef_long$dm)
+lvef_long$htn<-as.factor(lvef_long$htn)
+lvef_long$tobacco<-as.factor(lvef_long$tobacco)
+lvef_long$qrshbaseline_bin<-as.factor(lvef_long$qrshbaseline_bin)
+lvef_long$etiology_of_heart_failure<-as.factor(lvef_long$etiology_of_heart_failure)
+lvef_long$fibrillation<-as.factor(lvef_long$fibrillation)
+
+```
+
+## Addressing variables distribution
+
+### Long dataset variables distribution
+
+```{r }
+par(mfrow=c(1,2))
+for (i in 2:ncol(lvef_long)) {
+colname<-names(lvef_long[i])  
+ifelse( nrow(unique(lvef_long[i]))<10  
+        ,barplot(table(lvef_long[i]),main=colname,xlab=colname)
+        ,hist(as.numeric(unlist(lvef_long[,i]))
+        ,main = paste("Histogram of" ,colname),xlab=colname)
+         )
+cat('Summary of ',colname,'\n',sep = '')  
+cat(summary(lvef_long[i]),'\n',sep = '|')
+}
+```
+
+#### Log transforming, mean centering and standardizing variables
+
+We applied log to the exposures that are skewed.
+
+```{r}
+lvef_long<-lvef_long%>%
+  mutate(
+  lvef_baseline_static_log = log(lvef_baseline_static)
+, lvef_series_log = log(lvef_series)
+, age_log = log(age)
+)
+```
+
+### New dataset variables distribution
+
+```{r}
+selected_vars<-grep("_std|_log", names(lvef_long))
+
+par(mfrow=c(1,2))
+for (i in selected_vars ) {
+colname<-names(lvef_long[i])  
+ifelse( nrow(unique(lvef_long[i]))<10  
+        ,barplot(table(lvef_long[i]),main=colname,xlab=colname)
+        ,hist(as.numeric(unlist(lvef_long[,i]))
+        ,main = paste("Histogram of" ,colname),xlab=colname)
+         )
+cat('Summary of ',colname,'\n',sep = '')  
+cat(summary(lvef_long[i]),'\n',sep = '|')
+}
+```
+
+Log transforming the variables is not really addressing their skewness so we are not using the log transformed version of the variables.
+
+
+
+
+## Linear Mixed-Effects Model
+
+### Unadjusted
+
+#### Fitting our model
+
+```{r}
+lvef_unadjusted_model<-lmer(lvef_series  ~
+                              time*sex
+                            + age
+                            + sex
+                            + etiology_of_heart_failure
+                            + (1|ID)
+                            + lvef_baseline_static
+                            ,data=lvef_long)
+
+```
+
+##### Summary
+
+```{r}
+summary(lvef_unadjusted_model)
+
+write.xlsx(summary(lvef_unadjusted_model)$coefficients, paste('lvef_unadjusted_model_',Sys.Date(),'.xlsx'))
+```
+
+### Adjusted
+
+#### Fitting our model
+
+Same interaction and add LBBB.
+
+```{r}
+lvef_adjusted_model<-lmer( lvef_series ~
+                              time*sex
+                            + time*etiology_of_heart_failure
+                            + time*qrshbaseline_bin
+                            + time*LBBB
+                            + time
+                            + age
+                            + sex
+                            + (1|ID) 
+                            + dm
+                            + htn
+                            + tobacco
+                            + etiology_of_heart_failure
+                            + fibrillation
+                            + qrshbaseline
+                            + lvef_baseline_static
+                            + LBBB
+                             ,data=lvef_long)
+# the warning only occurs when running it in the markdown, not in the console, IT IS NOT AFFECTING THE RESULTS
+```
+
+##### Summary
+
+```{r}
+summary(lvef_adjusted_model)
+
+write.xlsx(summary(lvef_adjusted_model)$coefficients, 
+           paste('lvef_adjusted_model_',Sys.Date(),'.xlsx'))
+           
+```
+
+## Boxplot lvef by exam/sex
+
+Plotting adjusted model p-values.
+
+time1                            8.83e-06 ***
+time6                            1.34e-09 ***
+
+
+time1:sex1                       0.012858 *  
+time6:sex1                       0.036443 *  
+
+```{r}
+pvalue1<-'< 0.001'
+pvalue2<-'< 0.001'
+pvalue3<-0.01
+pvalue4<-0.04
+  
+a<-lvef_long%>%dplyr::filter(exam=='lvef' & !is.na(lvef_series) )%>% select(ID)
+a<-as.numeric(n_distinct(a))
+b<-lvef_long%>%filter(exam=='lvef1'& !is.na(lvef_series) )%>%select(ID)
+a<-lvef_long%>%dplyr::filter(exam=='lvef' & !is.na(lvef_series) )%>% select(ID)
+b<-as.numeric(n_distinct(b))
+c<-lvef_long%>%filter(exam=='lvef6'& !is.na(lvef_series))%>%select(ID)
+c<-as.numeric(n_distinct(c))
+
+codes_sex <- list ('0'='Male','1'='Female')
+
+codes_exam <- list (
+'lvef'=paste0('\nBaseline Visit','\n','N = ',a),
+'lvef1'=paste0('p-value = ',pvalue1,'\n 1st month \nafter CRT','\n','N = ',b),
+'lvef6'=paste0('p-value = ',pvalue2,'\n 6th month \nafter CRT','\n','N = ',c)
+)
+
+lvef_long %>% mutate(
+   exam = recode_factor(exam, !!!codes_exam)
+  ,sex = recode_factor(sex, !!!codes_sex)
+  )%>%
+ggplot(aes(x=exam, y=lvef_series, fill=sex)) + 
+  geom_boxplot()+
+  theme_minimal()+
+  xlab('')+
+  ylab('Ejection fraction (%)') +
+  annotate("text", y= 50, x =6,label=paste0("1st month after CRT\n Interaction with Female\np-value =",pvalue3,"\n1st month after CRT\n Interaction with Female\np-value = ",pvalue4),hjust=1) 
+
+ggsave(paste('boxplot_lvef',Sys.Date(),'.tiff',sep=''),device = 'tiff')
+
+# counting participants per exam
+
+
+remove(a);remove(b);remove(c);remove(pvalue1);remove(pvalue2);remove(pvalue3);remove(pvalue4)
+```
+# Six Minute Walking modeling
+
+## Exclusion criteria
+
+```{r}
+six_minute_walking_dataset<-finaldatasetAll3visits
+
+paste('Initial cohort size:',nrow(six_minute_walking_dataset))
+
+a<-nrow(six_minute_walking_dataset)
+six_minute_walking_dataset<-six_minute_walking_dataset%>%filter(!is.na(age))
+b<-nrow(six_minute_walking_dataset)
+print('Participant with missing age')
+a-b
+
+six_minute_walking_dataset<-six_minute_walking_dataset%>%filter(!is.na(sex))
+c<-nrow(six_minute_walking_dataset)
+print('Participant with missing sex')
+b-c
+
+six_minute_walking_dataset<-six_minute_walking_dataset%>%filter(!is.na(six_minute_walking_distanc1))
+print('Participant with missing 1 month six_minute_walking')
+d<-nrow(six_minute_walking_dataset)
+c-d
+
+paste('Final cohort size:',nrow(six_minute_walking_dataset))
+```
+
+## Reshaping the dataset
+
+In order to display changes in six_minute_walking over time, we will construct a longitudinal regression model. To do this, we first need to convert the data to long format.
+
+### Selecting the variables that will be included in the model
+
+```{r}
+finaldatasetAll3visits_to_reshape_six_minute_walking<-six_minute_walking_dataset%>%mutate(
+  six_minute_walking_distanc1_static = six_minute_walking_distanc1
+)%>%dplyr::select(
+# Fields that remain fixed across exams  
+  ID, sex, age, LBBB
+# adjustment
+,dm, htn, tobacco, etiology_of_heart_failure,  fibrillation, qrshbaseline,qrshbaseline_bin, six_minute_walking_distanc1_static  
+# Fields that vary in each exam
+, six_minute_walking_distanc1, six_minute_walking_distanc6
+
+)
+
+finaldatasetAll3visits_to_reshape_six_minute_walking$age<-round(finaldatasetAll3visits_to_reshape_six_minute_walking$age,2)
+
+```
+
+#### Table 1 of variables to be modeled
+
+```{r}
+table1(~sex + age + six_minute_walking_distanc1 + six_minute_walking_distanc6 + dm + htn + tobacco +  etiology_of_heart_failure + fibrillation + qrshbaseline + qrshbaseline_bin, data =  finaldatasetAll3visits_to_reshape_six_minute_walking)
+```
+
+#### Missingness Map
+
+```{r}
+missmap(finaldatasetAll3visits_to_reshape_six_minute_walking)
+```
+
+### Applying reshape
+
+```{r}
+vars_that_dont_vary<-c("ID","sex","age","dm", "htn", "tobacco", "etiology_of_heart_failure",  "fibrillation", "qrshbaseline","qrshbaseline_bin","six_minute_walking_distanc1_static","LBBB" )
+
+six_minute_walking_long<-melt(finaldatasetAll3visits_to_reshape_six_minute_walking, ID.vars = vars_that_dont_vary
+          ,measure.vars = c("six_minute_walking_distanc1","six_minute_walking_distanc6")
+          ,variable.name = c("exam")
+          ,value.name = "six_minute_walking_series"
+          )
+
+six_minute_walking_long<-six_minute_walking_long%>%group_by(ID)%>%mutate(
+  time = c(1,6)
+)
+
+row.names(six_minute_walking_long) <- NULL
+
+six_minute_walking_long$ID <- as.factor(six_minute_walking_long$ID)
+six_minute_walking_long$sex<-as.factor(six_minute_walking_long$sex)
+six_minute_walking_long$time<-as.factor(six_minute_walking_long$time)
+six_minute_walking_long$dm<-as.factor(six_minute_walking_long$dm)
+six_minute_walking_long$htn<-as.factor(six_minute_walking_long$htn)
+six_minute_walking_long$tobacco<-as.factor(six_minute_walking_long$tobacco)
+six_minute_walking_long$qrshbaseline_bin<-as.factor(six_minute_walking_long$qrshbaseline_bin)
+six_minute_walking_long$etiology_of_heart_failure<-as.factor(six_minute_walking_long$etiology_of_heart_failure)
+six_minute_walking_long$fibrillation<-as.factor(six_minute_walking_long$fibrillation)
+
+```
+
+## Addressing variables distribution
+
+### Long dataset variables distribution
+
+```{r }
+par(mfrow=c(1,2))
+for (i in 2:ncol(six_minute_walking_long)) {
+colname<-names(six_minute_walking_long[i])  
+ifelse( nrow(unique(six_minute_walking_long[i]))<10  
+        ,barplot(table(six_minute_walking_long[i]),main=colname,xlab=colname)
+        ,hist(as.numeric(unlist(six_minute_walking_long[,i]))
+        ,main = paste("Histogram of" ,colname),xlab=colname)
+         )
+cat('Summary of ',colname,'\n',sep = '')  
+cat(summary(six_minute_walking_long[i]),'\n',sep = '|')
+}
+```
+
+Some predictor variables are on very different scales so we are rescaling
+
+#### Log transforming variables
+
+We applied log to the exposures that are skewed.
+
+```{r}
+six_minute_walking_long<-six_minute_walking_long%>%
+  mutate(
+  six_minute_walking_distanc1_static_log = log(six_minute_walking_distanc1_static)
+, six_minute_walking_series_log = log(six_minute_walking_series)
+, age_log= log(age)
+)
+```
+
+### New dataset variables distribution
+
+```{r}
+selected_vars<-grep("_log", names(six_minute_walking_long))
+
+par(mfrow=c(1,2))
+for (i in selected_vars ) {
+colname<-names(six_minute_walking_long[i])  
+ifelse( nrow(unique(six_minute_walking_long[i]))<10  
+        ,barplot(table(six_minute_walking_long[i]),main=colname,xlab=colname)
+        ,hist(as.numeric(unlist(six_minute_walking_long[,i]))
+        ,main = paste("Histogram of" ,colname),xlab=colname)
+         )
+cat('Summary of ',colname,'\n',sep = '')  
+cat(summary(six_minute_walking_long[i]),'\n',sep = '|')
+}
+```
+
+Log transforming the variables is not really addressing their skewness so we are not using the log transformed version of the variables.
+
+
+
+## Linear Mixed-Effects Model
+
+### Unadjusted
+
+#### Fitting our model
+
+```{r}
+six_minute_walking_unadjusted_model<-lmer(
+                              six_minute_walking_series  ~
+                              time*sex
+                            + age
+                            + sex
+                            + six_minute_walking_distanc1_static
+                            + etiology_of_heart_failure
+                            + (1|ID)
+                            ,data=six_minute_walking_long)
+
+```
+
+##### Summary
+
+```{r}
+summary(six_minute_walking_unadjusted_model)
+ 
+write.xlsx(summary(six_minute_walking_unadjusted_model)$coefficients,
+                      paste('six_minute_walking_unadjusted_model_',Sys.Date(),'.xlsx'))
+```
+
+### Adjusted
+
+#### Fitting our model
+
+```{r}
+six_minute_walking_adjusted_model<-lmer( six_minute_walking_series ~
+                              time*sex
+                            + time
+                            + age
+                            + sex
+                            + (1|ID) 
+                            + dm
+                            + htn
+                            + tobacco
+                            + etiology_of_heart_failure
+                            + fibrillation
+                            + qrshbaseline
+                            + six_minute_walking_distanc1_static
+                            + LBBB
+                             ,data=six_minute_walking_long)
+
+```
+
+##### Summary
+
+```{r}
+summary(six_minute_walking_adjusted_model)
+ 
+write.xlsx(summary(six_minute_walking_adjusted_model)$coefficients,
+                      paste('six_minute_walking_adjusted_model_',Sys.Date(),'.xlsx'))
+
+```
+## Boxplot six_minute_walking_distanc1 by exam/sex
+
+Plotting adjusted model p-values.
+
+time6                                0.0388 *  
+
+time6:sex1                           0.8620  
+
+```{r}
+pvalue1<-0.04
+pvalue2<-0.86
+
+a<-six_minute_walking_long%>%filter(exam=='six_minute_walking_distanc1' & !is.na(six_minute_walking_series))%>%select(ID)
+a<-as.numeric(n_distinct(a))
+b<-six_minute_walking_long%>%filter(exam=='six_minute_walking_distanc6' & !is.na(six_minute_walking_series))%>%select(ID)
+b<-n_distinct(b)
+
+codes_exam <- list (
+'six_minute_walking_distanc1'=paste0('\n6 MWT at\n1st month after CRT','\n','N = ',a),
+'six_minute_walking_distanc6'=paste0('p-value = ',pvalue1,'\n 6  MWT at \n6th month after CRT','\n','N = ',b)
+)
+codes_sex <- list ('0'='Male','1'='Female')
+six_minute_walking_long %>% mutate(
+  exam = recode_factor(exam, !!!codes_exam)
+  ,sex = recode_factor(sex, !!!codes_sex)
+  )%>%
+ggplot(aes(x=exam, y=six_minute_walking_series, fill=sex)) + 
+  geom_boxplot()+
+  theme_minimal()+
+  xlab('Visits')+
+  ylab('Distance covered (ft)')+
+  annotate("text", y= 2500, x =3,label=paste0("\n6th month after CRT\n Interaction with Female\np-value = ",pvalue2),hjust=1) 
+
+ggsave(paste('boxplotMWT',Sys.Date(),'.tiff',sep=''),device = 'tiff')
+
+# counting participants per exam
+a<-six_minute_walking_long%>%filter(exam=='six_minute_walking_distanc1' & !is.na(six_minute_walking_series))%>%select(ID)
+n_distinct(a)
+b<-six_minute_walking_long%>%filter(exam=='six_minute_walking_distanc6' & !is.na(six_minute_walking_series))%>%select(ID)
+n_distinct(b)
+remove(a);remove(b);remove(pvalue1);remove(pvalue2)
+```
+
+# New York Heart Association modeling
+
+## Exclusion criteria
+
+```{r}
+new_york_heart_association_dataset<-finaldatasetAll3visits
+
+paste('Initial cohort size:',nrow(new_york_heart_association_dataset))
+
+
+a<-nrow(new_york_heart_association_dataset)
+new_york_heart_association_dataset<-new_york_heart_association_dataset%>%filter(!is.na(age))
+b<-nrow(new_york_heart_association_dataset)
+print('Participant with missing age')
+a-b
+
+new_york_heart_association_dataset<-new_york_heart_association_dataset%>%filter(!is.na(sex))
+c<-nrow(new_york_heart_association_dataset)
+print('Participant with missing sex')
+b-c
+
+new_york_heart_association_dataset<-new_york_heart_association_dataset%>%filter(!is.na(new_york_heart_association))
+print('Participant with missing baseline new_york_heart_association')
+d<-nrow(new_york_heart_association_dataset)
+c-d
+
+paste('Final cohort size:',nrow(new_york_heart_association_dataset))
+```
+
+
+## Reshaping the dataset
+
+In order to display changes in new_york_heart_association over time, we will construct a longitudinal regression model. To do this, we first need to convert the data to long format.
+
+### Selecting the variables that will be included in the model
+
+```{r}
+new_york_heart_association_dataset_to_reshape<-new_york_heart_association_dataset%>%mutate(
+  new_york_heart_association_baseline_static = new_york_heart_association
+)%>%dplyr::select(
+# Fields that remain fixed across exams  
+  ID, sex, age
+# adjustment
+,dm, htn, tobacco, etiology_of_heart_failure,  fibrillation, qrshbaseline, new_york_heart_association_baseline_static  , LBBB, qrshbaseline_bin
+# Fields that vary in each exam
+, new_york_heart_association, new_york_heart_association1, new_york_heart_association6
+
+)
+
+new_york_heart_association_dataset_to_reshape$age<-round(new_york_heart_association_dataset_to_reshape$age,2)
+
+```
+
+#### Table 1 of variables to be modeled
+TODO FACTORIZE CATS
+
+```{r}
+table1(~sex + age + new_york_heart_association + new_york_heart_association1 + new_york_heart_association6 + dm + htn + tobacco + etiology_of_heart_failure + fibrillation + qrshbaseline + qrshbaseline_bin + LBBB, data =  new_york_heart_association_dataset_to_reshape)
+```
+
+#### Missingness Map
+
+```{r}
+missmap(new_york_heart_association_dataset_to_reshape)
+```
+
+
+### Applying reshape
+
+```{r}
+vars_that_dont_vary<-c("ID","sex","age","dm", "htn", "tobacco", "etiology_of_heart_failure",  "fibrillation", "qrshbaseline","qrshbaseline_bin","new_york_heart_association_baseline_static","LBBB" )
+
+new_york_heart_association_long<-melt(new_york_heart_association_dataset_to_reshape, ID.vars = vars_that_dont_vary
+          ,measure.vars = c("new_york_heart_association","new_york_heart_association1","new_york_heart_association6")
+          ,variable.name = c("exam")
+          ,value.name = "new_york_heart_association_series"
+          )
+
+new_york_heart_association_long<-new_york_heart_association_long%>%group_by(ID)%>%mutate(
+  time = c(0,1,6)
+)
+
+row.names(new_york_heart_association_long) <- NULL
+
+new_york_heart_association_long$ID <- as.factor(new_york_heart_association_long$ID)
+new_york_heart_association_long$sex<-as.factor(new_york_heart_association_long$sex)
+new_york_heart_association_long$time<-as.factor(new_york_heart_association_long$time)
+new_york_heart_association_long$dm<-as.factor(new_york_heart_association_long$dm)
+new_york_heart_association_long$htn<-as.factor(new_york_heart_association_long$htn)
+new_york_heart_association_long$tobacco<-as.factor(new_york_heart_association_long$tobacco)
+new_york_heart_association_long$etiology_of_heart_failure<-as.factor(new_york_heart_association_long$etiology_of_heart_failure)
+new_york_heart_association_long$fibrillation<-as.factor(new_york_heart_association_long$fibrillation)
+new_york_heart_association_long$LBBB<-as.factor(new_york_heart_association_long$LBBB)
+new_york_heart_association_long$qrshbaseline_bin<-as.factor(new_york_heart_association_long$qrshbaseline_bin)
+
+```
+
+## Addressing variables distribution
+
+### Long dataset variables distribution
+
+```{r }
+par(mfrow=c(1,2))
+for (i in 2:ncol(new_york_heart_association_long)) {
+colname<-names(new_york_heart_association_long[i])  
+ifelse( nrow(unique(new_york_heart_association_long[i]))<10  
+        ,barplot(table(new_york_heart_association_long[i]),main=colname,xlab=colname)
+        ,hist(as.numeric(unlist(new_york_heart_association_long[,i]))
+        ,main = paste("Histogram of" ,colname),xlab=colname)
+         )
+cat('Summary of ',colname,'\n',sep = '')  
+cat(summary(new_york_heart_association_long[i]),'\n',sep = '|')
+}
+```
+
+#### Log transforming, mean centering and standardizing variables
+
+There are no skewed exposures.
+
+
+
+The color is the NYHA categories and the height is the percentage.
+
+## Linear Mixed-Effects Model
+
+### Unadjusted
+
+#### Fitting our model
+
+```{r}
+new_york_heart_association_unadjusted_model<-lmer(new_york_heart_association_series  ~
+                              time*sex
+                            + age
+                            + sex
+                            + etiology_of_heart_failure
+                            + (1|ID)
+                            + new_york_heart_association_baseline_static
+                            ,data=new_york_heart_association_long)
+```
+
+##### Summary
+
+```{r}
+summary(new_york_heart_association_unadjusted_model)
+
+write.xlsx(summary(new_york_heart_association_unadjusted_model)$coefficients,
+                                 paste('new_york_heart_association_unadjusted_model_',Sys.Date(),'.xlsx'))
+
+```
+
+
+### Adjusted
+
+#### Fitting our model
+
+```{r}
+new_york_heart_association_adjusted_model<-lmer( new_york_heart_association_series ~
+                              time*sex
+                            + time
+                            + age
+                            + sex
+                            + (1|ID) 
+                            + dm
+                            + htn
+                            + tobacco
+                            + etiology_of_heart_failure
+                            + fibrillation
+                            + qrshbaseline
+                            + new_york_heart_association_baseline_static
+                            + LBBB
+                             ,data=new_york_heart_association_long)
+```
+
+##### Summary
+
+```{r}
+summary(new_york_heart_association_adjusted_model)
+
+write.xlsx(summary(new_york_heart_association_adjusted_model)$coefficients,
+           paste("new_york_heart_association_adjusted_", Sys.Date(),".xlsx",sep=''))
+```
+## Stacked Plot new_york_heart_association by exam/sex
+
+Plotting adjusted model p-values.
+
+time1                                       < 2e-16 ***
+time6                                       < 2e-16 ***
+ 
+time1:sex1                                 0.673911    
+time6:sex1                                 0.130631  
+
+```{r fig.height=7, fig.width=8}
+pvalue1<-'< 0.001'
+pvalue2<-'< 0.001'
+pvalue3<-0.67
+pvalue4<-0.13
+
+a<-new_york_heart_association_long%>%filter(exam=='new_york_heart_association'  & !is.na(new_york_heart_association_series))%>%select(ID)
+a<-as.numeric(n_distinct(a))
+b<-new_york_heart_association_long%>%filter(exam=='new_york_heart_association1' & !is.na(new_york_heart_association_series))%>%select(ID)
+b<-as.numeric(n_distinct(b))
+c<-new_york_heart_association_long%>%filter(exam=='new_york_heart_association6' & !is.na(new_york_heart_association_series))%>%select(ID)
+c<-as.numeric(n_distinct(c))
+
+codes_exam <- list (
+'new_york_heart_association'=paste0('\nBaseline','\n','N = ',a),
+'new_york_heart_association1'=paste0('p-value = ',pvalue1,'\n1st month \nafter CRT','\n','N = ',b),
+'new_york_heart_association6'=paste0('p-value = ',pvalue2,'\n 6th month \nafter CRT','\n','N = ',c)
+)
+
+codes_sex <- list ('0'='Male','1'='Female')
+
+new_york_heart_association_long %>% mutate(
+  exam = recode_factor(exam, !!!codes_exam)
+  ,sex = recode_factor(sex, !!!codes_sex))%>%
+  ggplot( aes(fill=as.factor(new_york_heart_association_series), y=new_york_heart_association_series, x=sex))+ 
+  geom_bar(position="fill", stat="identity")+
+  theme_minimal()+
+  xlab('Visits')+
+  ylab('NYHA progression (%)')+
+  scale_fill_discrete(name = "NYHA")+
+  facet_grid(~ exam)+
+  theme(plot.title = element_text(hjust = 1))+
+  labs(title=paste0("1st month after CRT\n Interaction with Female\np-value =",pvalue3,"\n6th month after CRT\n Interaction with Female\np-value = ",pvalue4))
+
+ggsave(paste('stacked_plot_nyha',Sys.Date(),'.tiff',sep=''),device = 'tiff')
+
+# counting participants per exam
+
+
+remove(a);remove(b);remove(c);remove(pvalue1);remove(pvalue2);remove(pvalue3)
+
+
+```
+
+# Kaplan-Meier survival Analyses
+
+## Adjusted survival analysis (feature selection) with COPD.
+
+## Data distribution
+
+```{r}
+contvars<-c("age","qrshbaseline","months_alive","lvef","six_minute_walking_distanc1")
+
+catvars<-c("death","etiology_of_heart_failure","dm","htn","qrshbaseline_bin","fibrillation","LBBB")
+
+statifyby<-c("sex")
+
+allvars<-c(contvars,catvars)
+
+#abnormallydistributed<-c(there are none)
+
+table1 <- CreateTableOne(vars = allvars
+                         , data = finaldatasetAll3visits
+                         , factorVars = catvars
+                         , testNormal=oneway.test # This is equivalent of the t-test when there are only two groups.
+                         )
+
+table1strat <- CreateTableOne(vars = allvars
+                              , data = finaldatasetAll3visits
+                              , factorVars = catvars
+                             #, testNormal=oneway.test 
+                              , strata = statifyby
+                         )
+
+table1_printed<-as.data.frame(print(table1
+                                    #, nonnormal = abnormallydistributed
+                                    , missing = T
+                                    ))
+
+table1strat_printed<-as.data.frame(print(table1strat
+                                    #, nonnormal = abnormallydistributed
+                                    ))
+
+table1_final<-cbind(table1_printed,table1strat_printed)
+write.xlsx(as.data.frame(print(table1_final)), paste("table1_Kaplan_Meier_adjusted", Sys.Date(),".xlsx",sep=''))
+```
+
+## Survival analysis
+
+Only add baseline variables.
+
+```{r}
+coxph <- coxph( Surv(months_alive ,death) ~ 
+                    scale(center=T, scale=T,lvef) 
+                  + scale(center=T, scale=T,age )
+                  + as.factor(sex)
+                  + as.factor(etiology_of_heart_failure)
+                  + as.factor(dm)
+                  + as.factor(htn)
+                  + as.factor(qrshbaseline_bin)
+                  + as.factor(fibrillation)
+                  + as.factor(LBBB)
+                  , method="breslow"
+                ,data=finaldatasetAll3visits
+                )
+
+summary(coxph)
+
+```
+
+### Testing for the proportional-hazards (PH) assumption
+
+```{r}
+cox.zph(coxph)
+```
+
+## Kaplan-Meier by sex
+
+Ignore observations that are lost to follow up. 
+
+```{r fig.height=6, fig.width=8}
+ggsurvplot(
+      fit= survfit(Surv(months_alive, death) ~ sex, data = finaldatasetAll3visits)
+     ,xlab = "Months"
+     ,ylab = "Overall survival probability"
+     ,pval = TRUE
+     ,conf.int = TRUE
+    ,legend.title = "Sex"
+    ,legend.labs = c("Male", "Female")
+, risk.table = TRUE)
+
+ggsave(paste('Kaplan-Meier_by_sex',Sys.Date(),'.tiff',sep=''),device = 'tiff')
+
+```
+
+# New variable creation
+
+Median and Interquartile Range
+
+days_between_visit1 = date of visit 1 - date_of_implant 
+
+days_between_visit1 = date of visit 6 - date_of_implant 
+
+The variable names are: date of implant, date_visit 1, date_visit6
+
+
+
+```{r}
+finaldatasetAll3visits$days_between_visit1_implant<-as.numeric(finaldatasetAll3visits$visit_date1 - finaldatasetAll3visits$date_of_implant)
+finaldatasetAll3visits$days_between_visit6_implant<-as.numeric(finaldatasetAll3visits$visit_date6 - finaldatasetAll3visits$date_of_implant)
+
+summary(finaldatasetAll3visits$days_between_visit1_implant)
+summary(finaldatasetAll3visits$days_between_visit6_implant)
+```
+
+
+# Table 1 Main manuscript Overall
+
+Stratified by Sex
+
+```{r}
+contvars<-c("age","qrshbaseline","lvef","six_minute_walking_distanc1","six_minute_walking_distanc6","lvef1","lvef6")
+
+catvars<-c("death","etiology_of_heart_failure","dm","htn","qrshbaseline_bin","fibrillation","LBBB","icd_","loop_diuretic","ace_i","arb","beta_blocker","aldosterone_antagonist","new_york_heart_association","sex","tobacco","new_york_heart_association1","new_york_heart_association6")
+
+statifyby<-c("sex")
+
+allvars<-c(contvars,catvars)
+
+#abnormallydistributed<-c(there are none)
+
+table1 <- CreateTableOne(vars = allvars
+                         , data = finaldatasetAll3visits
+                         , factorVars = catvars
+                         , testNormal=oneway.test # This is equivalent of the t-test when there are only two groups.
+                         )
+
+table1_printed<-as.data.frame(print(table1
+                                    #, nonnormal = abnormallydistributed
+                                    ))
+
+table1_strat <- CreateTableOne(vars = allvars
+                         , data = finaldatasetAll3visits
+                         , factorVars = catvars
+                         , testNormal=oneway.test # This is equivalent of the t-test when there are only two groups.
+                         ,strata = statifyby
+                         )
+table1_strat_printed<-as.data.frame(print(table1_strat
+                                    #, nonnormal = abnormallydistributed
+                                    , missing = T
+                                    ))
+table1_strat<-cbind(table1_printed, table1_strat_printed)
+table1_strat$Available_Overall_N<-as.numeric(table1_strat['n',]$Overall)-round((as.numeric(table1_strat['n',]$Overall)*as.numeric(table1_strat$Missing))/100,0)
+table1_strat$mainkey<-rownames(table1_strat)
+
+table1_male <- CreateTableOne(vars = allvars
+                              , data = finaldatasetAll3visits%>%filter(sex==1)
+                              , factorVars = catvars
+                             #, testNormal=oneway.test 
+                         )
+table1_male_printed<-as.data.frame(print(table1_male
+                                    #, nonnormal = abnormallydistributed
+                                    , missing = T
+                                    ))
+table1_male_printed$Available_male_N<-as.numeric(table1_male_printed['n',]$Overall)-round((as.numeric(table1_male_printed['n',]$Overall)*as.numeric(table1_male_printed$Missing))/100,0)
+table1_male_printed$mainkey<-rownames(table1_male_printed)
+
+
+table1_female <- CreateTableOne(vars = allvars
+                              , data = finaldatasetAll3visits%>%filter(sex==0)
+                              , factorVars = catvars
+                             #, testNormal=oneway.test 
+                         )
+table1_female_printed<-as.data.frame(print(table1_female
+                                    #, nonnormal = abnormallydistributed
+                                    , missing = T
+                                    ))
+table1_female_printed$Available_female_N<-as.numeric(table1_female_printed['n',]$Overall)-round((as.numeric(table1_female_printed['n',]$Overall)*as.numeric(table1_female_printed$Missing))/100,0)
+table1_female_printed$mainkey<-rownames(table1_female_printed)
+
+
+table1_final<-left_join(table1_strat, table1_male_printed%>%select(mainkey,Available_male_N))
+table1_final<-left_join(table1_final, table1_female_printed%>%select(mainkey,Available_female_N))
+
+table1_final<-table1_final%>%rename(Male=`0`)
+table1_final<-table1_final%>%rename(Female=`1`)
+
+table1_final<-table1_final%>%select(mainkey,Overall,Male,Female,Available_Overall_N,Available_male_N,Available_female_N,p)
+
+write.xlsx(table1_final, paste("table1_strat_",Sys.Date(),".xlsx",sep = "") )
+```
+
+# Table 1 Main manuscript LVEF
+
+Stratified by Sex
+
+```{r}
+contvars<-c("age","qrshbaseline","lvef","six_minute_walking_distanc1","six_minute_walking_distanc6","lvef1","lvef6")
+
+catvars<-c("death","dm","htn","qrshbaseline_bin","fibrillation","LBBB","etiology_of_heart_failure","icd_","loop_diuretic","ace_i","arb","beta_blocker","aldosterone_antagonist","new_york_heart_association","sex","tobacco","new_york_heart_association1","new_york_heart_association6")
+
+statifyby<-c("sex")
+
+allvars<-c(contvars,catvars)
+
+#abnormallydistributed<-c(there are none)
+
+table1 <- CreateTableOne(vars = allvars
+                         , data = lvef_dataset_to_reshape_lvef
+                         , factorVars = catvars
+                         , testNormal=oneway.test # This is equivalent of the t-test when there are only two groups.
+                         )
+
+table1strat <- CreateTableOne(vars = allvars
+                              , data = lvef_dataset_to_reshape_lvef
+                              , factorVars = catvars
+                             #, testNormal=oneway.test 
+                              , strata = statifyby
+                         )
+
+table1_printed<-as.data.frame(print(table1
+                                    #, nonnormal = abnormallydistributed
+                                    , missing = T
+                                    ))
+
+table1strat_printed<-as.data.frame(print(table1strat
+                                    #, nonnormal = abnormallydistributed
+                                    ))
+
+
+table1_final<-cbind(table1_printed,table1strat_printed)
+table1_final$Missing_N<-round((as.numeric(table1_final['n',]$Overall)*as.numeric(table1_final$Missing))/100,0)
+table1_final
+write.xlsx(as.data.frame(print(table1_final)), paste("table1_lvef_",Sys.Date(),".xlsx",sep = "") )
+```
+
+# Table 1 Main manuscript Six Minute Walking
+
+Stratified by Sex
+
+```{r}
+contvars<-c("age","qrshbaseline","lvef","six_minute_walking_distanc1","six_minute_walking_distanc6","lvef1","lvef6")
+
+catvars<-c("death","dm","htn","qrshbaseline_bin","fibrillation","LBBB","etiology_of_heart_failure","icd_","loop_diuretic","ace_i","arb","beta_blocker","aldosterone_antagonist","new_york_heart_association","sex","tobacco","new_york_heart_association1","new_york_heart_association6")
+
+statifyby<-c("sex")
+
+allvars<-c(contvars,catvars)
+
+#abnormallydistributed<-c(there are none)
+
+table1 <- CreateTableOne(vars = allvars
+                         , data = finaldatasetAll3visits_to_reshape_six_minute_walking
+                         , factorVars = catvars
+                         , testNormal=oneway.test # This is equivalent of the t-test when there are only two groups.
+                         )
+
+table1strat <- CreateTableOne(vars = allvars
+                              , data = finaldatasetAll3visits_to_reshape_six_minute_walking
+                              , factorVars = catvars
+                             #, testNormal=oneway.test 
+                              , strata = statifyby
+                         )
+
+table1_printed<-as.data.frame(print(table1
+                                    #, nonnormal = abnormallydistributed
+                                    , missing = T
+                                    ))
+
+table1strat_printed<-as.data.frame(print(table1strat
+                                    #, nonnormal = abnormallydistributed
+                                    ))
+
+
+table1_final<-cbind(table1_printed,table1strat_printed)
+table1_final$Missing_N<-round((as.numeric(table1_final['n',]$Overall)*as.numeric(table1_final$Missing))/100,0)
+table1_final
+write.xlsx(as.data.frame(print(table1_final)), paste("table1_six_min_walk_",Sys.Date(),".xlsx",sep = "") )
+```
+
+# Table 1 Main manuscript NYHA
+
+Stratified by Sex
+
+```{r}
+contvars<-c("age","qrshbaseline","lvef","six_minute_walking_distanc1","six_minute_walking_distanc6","lvef1","lvef6")
+
+catvars<-c("death","dm","htn","qrshbaseline_bin","fibrillation","LBBB","etiology_of_heart_failure","icd_","loop_diuretic","ace_i","arb","beta_blocker","aldosterone_antagonist","new_york_heart_association","sex","tobacco","new_york_heart_association1","new_york_heart_association6")
+
+statifyby<-c("sex")
+
+allvars<-c(contvars,catvars)
+
+#abnormallydistributed<-c(there are none)
+
+table1 <- CreateTableOne(vars = allvars
+                         , data = new_york_heart_association_dataset_to_reshape
+                         , factorVars = catvars
+                         , testNormal=oneway.test # This is equivalent of the t-test when there are only two groups.
+                         )
+
+table1strat <- CreateTableOne(vars = allvars
+                              , data = new_york_heart_association_dataset_to_reshape
+                              , factorVars = catvars
+                             #, testNormal=oneway.test 
+                              , strata = statifyby
+                         )
+
+table1_printed<-as.data.frame(print(table1
+                                    #, nonnormal = abnormallydistributed
+                                    , missing = T
+                                    ))
+
+table1strat_printed<-as.data.frame(print(table1strat
+                                    #, nonnormal = abnormallydistributed
+                                    ))
+
+
+table1_final<-cbind(table1_printed,table1strat_printed)
+table1_final$Missing_N<-round((as.numeric(table1_final['n',]$Overall)*as.numeric(table1_final$Missing))/100,0)
+table1_final
+write.xlsx(as.data.frame(print(table1_final)), paste("table1_six_min_walk_",Sys.Date(),".xlsx",sep = "") )
+```
